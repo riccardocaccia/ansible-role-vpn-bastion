@@ -35,163 +35,163 @@ terraform_bastion/
 
 ---
 
-## 1) Set the inventory
+## 1) Main.tf file
 
-Edit `inventory` and set your bastion’s public IP and SSH user:
+Provider settings and terraform requirements:
 
-```ini
+> **Note:** Keystone login is needed in order to proceed, otherwise you can think to use OIDC login to access the OpenStack cloud enviroment
+
+```hcl
+# ---------------------------------
+# Provider = OpenStack
+# ---------------------------------
+terraform {
+  required_version = ">= 1.4.0"
+  required_providers {
+	openstack = {
+	source  = "terraform-provider-openstack/openstack"
+	version = "~> 1.53.0"
+	}
+  }
+}
+
+provider "openstack" {
+  auth_url    = var.auth_url
+  user_name   = var.user_name
+  password    = var.password
+  tenant_name = var.tenant_name
+  region      = var.region
+}
+```
+---
+
+## 2) Key generation
+
+You can set your preferred name for your key pair, also pay attention to the path and key location of your public key (here: ~/.ssh/authorized_keys):
+
+  ```hcl
+  # ---------------------------------
+  # Keypair
+  # ---------------------------------
+  resource "openstack_compute_keypair_v2" "bastion_key" {
+  name       = "bastion-key"
+  public_key = file("~/.ssh/authorized_keys")
+  }
+  ```
+---
+
+## 3) Network definition
+
+In the network configuration is important to assign a public and a private network access:
+
+```hcl
+# ---------------------------------
+# Network
+# ---------------------------------
+
+# Private network
+data "openstack_networking_network_v2" "private" {
+  name = "private_net"
+}
+# subnet
+data "openstack_networking_subnet_v2" "private_subnet" {
+  network_id = data.openstack_networking_network_v2.private.id
+}
+
+# public network
+data "openstack_networking_network_v2" "public" {
+  name = "public_net"
+}
+
+```
+---
+
+## 4) VM Bastion
+
+The VM is configururated as reported, here is importatnt to define your bastion name inside the field `name`:
+
+```hcl
+# ---------------------------------
+# VM Bastion
+# ---------------------------------
+resource "openstack_compute_instance_v2" "bastion" {
+  name            = "NAME-OF-YOUR-BASTION"
+  flavor_name     = var.flavor
+  image_name      = var.image
+  key_pair        = openstack_compute_keypair_v2.bastion_key.name
+
+  # NIC pubblica
+  network {
+    uuid = data.openstack_networking_network_v2.public.id
+  }
+
+  # NIC privata
+  network {
+    uuid = data.openstack_networking_network_v2.private.id
+  }
+
+  metadata = {
+    ansible_user = "ubuntu"
+  }
+}
+```
+---
+
+## 6) Ansible part
+
+This section creates the inventory file dynamically and executes the Ansible playbook using `null_resource` and `local-exec`:
+
+```hcl
+# ---------------------------------
+# Inventory per Ansible
+# ---------------------------------
+resource "local_file" "inventory" {
+  filename = "/home/ubuntu/ansible-role-vpn-bastion/ansible-role/inventory"
+  content  = <<EOF
 [bastion]
-bastion1 ansible_host=BASTION_PUBLIC_IP ansible_user=ubuntu
-```
+bastion1 ansible_host=${openstack_compute_instance_v2.bastion.access_ip_v4} ansible_user=ubuntu ansible_ssh_private_key_file=~/.ssh/my_private
+EOF
+}
 
----
+# ---------------------------------
+# Provisioning Ansible
+# ---------------------------------
+resource "null_resource" "ansible_provision" {
+  depends_on = [
+    openstack_compute_instance_v2.bastion,
+    local_file.inventory
+  ]
 
-## 2) Choose the IdP and fill provider endpoints
+  provisioner "local-exec" {
+    working_dir = "/home/ubuntu/ansible-role-vpn-bastion/ansible-role"
+    command     =  <<EOT
+    # Wait VM to be reachable via SSH
+until ssh -o StrictHostKeyChecking=no -i /home/ubuntu/.ssh/my_private ubuntu@${openstack_compute_instance_v2.bastion.access_ip_v4} "echo ok" 2>/dev/null; do
+  echo "Waiting for SSH on ${openstack_compute_instance_v2.bastion.access_ip_v4}..."
+  sleep 5
+done 
 
-Open `group_vars/bastion.yml`:
-
-* Pick your provider:
-
-  ```yaml
-  idp_provider: "iam"   # or lifescience | egi
-  ```
-* IAM endpoints are prefilled. For other IdPs, replace the placeholders:
-
-  ```yaml
-  oidc_providers:
-    iam:
-      device_endpoint:   "https://iam.recas.ba.infn.it/devicecode"
-      token_endpoint:    "https://iam.recas.ba.infn.it/token"
-      userinfo_endpoint: "https://iam.recas.ba.infn.it/userinfo"
-    lifescience:
-      device_endpoint:   "FILL_ME"
-      token_endpoint:    "FILL_ME"
-      userinfo_endpoint: "FILL_ME"
-    egi:
-      device_endpoint:   "FILL_ME"
-      token_endpoint:    "FILL_ME"
-      userinfo_endpoint: "FILL_ME"
-  ```
-* Leave `username_attribute: "preferred_username"` unless your IdP uses a different claim.
-* (Optional) Restrict access to specific IdP groups:
-
-  ```yaml
-  allowed_groups: ["group1", "group2"]   # empty list disables group checks
-  ```
-
----
-
-## 3) Put **secrets** into the Vault file
-
-Edit `group_vars/bastion.vault.yml` and set:
-
-```yaml
-# OIDC client (confidential)
-client_id: "YOUR_OIDC_CLIENT_ID"
-client_secret: "YOUR_OIDC_CLIENT_SECRET"
-
-# SMTP password (only if enable_email: true in bastion.yml)
-smtp:
-  smtp_password: "YOUR_SMTP_PASSWORD"
-
-# Create local UNIX users before enabling PAM (must include the OIDC preferred_username)
-preferred_username: "your_oidc_username"
-extra_local_users:
-  - "im"            # technical jump user (optional)
-  # - "anotheruser" # add more if needed
-
-# SSH public key for the 'im' user (optional)
-jump_user_pubkey: "ssh-rsa AAAA... comment"
-```
-
-> The **`client_id`** is public but we keep it alongside the secret to keep all OIDC client fields in one place.
-
----
-
-## 4) (Optional) enable email for device code/URL
-
-In `group_vars/bastion.yml`:
-
-```yaml
-enable_email: true
-smtp:
-  smtp_server_url: "smtps://smtp.gmail.com:465"
-  smtp_username: "your-smtp-user"
-  # smtp_password goes in bastion.vault.yml
-```
-
----
-
-## 5) (Recommended) Encrypt secrets with **Ansible Vault**
-
-Create a vault password file (kept **out** of git by `.gitignore`):
-
-```bash
-echo "your-strong-password" > .vault_pass.txt
-chmod 600 .vault_pass.txt
-```
-
-Encrypt the secrets file:
-
-```bash
-ansible-vault encrypt group_vars/bastion.vault.yml --vault-password-file .vault_pass.txt
-```
-
-Edit or view later:
-
-```bash
-ansible-vault edit group_vars/bastion.vault.yml --vault-password-file .vault_pass.txt
-ansible-vault view group_vars/bastion.vault.yml --vault-password-file .vault_pass.txt
-```
-
----
-
-## 6) Run the playbook
-
-### Option A — **Vault encrypted** (recommended)
-
-```bash
-ansible-playbook -i inventory site.yml --vault-password-file .vault_pass.txt
-# or interactively:
-# ansible-playbook -i inventory site.yml --ask-vault-pass
-```
-
-### Option B — **Vault not encrypted** (for quick local tests only)
-
-```bash
 ansible-playbook -i inventory site.yml
+EOT
+  }
+}
 ```
-
 ---
 
-## 7) First login test
+# variables value
 
-From your client:
-
-```bash
-ssh -l YOUR_OIDC_USERNAME BASTION_PUBLIC_IP
-```
-
-* You’ll see a **device flow URL** and **user code**.
-* Open the URL, authenticate with the chosen IdP, and **approve**.
-* Return to the terminal and hit **Enter**. The SSH session should open.
-* On first login, the role ensures `pam_mkhomedir` will create your home directory.
-
-> You can also test locally on the bastion with:
->
-> ```bash
-> sudo apt-get install -y pamtester
-> pamtester -v pamtester YOUR_OIDC_USERNAME authenticate
-> ```
-
----
-
-## Notes & tips
-
-* The playbook removes `@include common-auth` from `/etc/pam.d/sshd` and inserts:
+> **NOTE:** is important to not commit this file, it contains sensible data! 
 
   ```
-  auth sufficient pam_oauth2_device.so /etc/pam_oauth2_device/config.json
+  auth_url      = "AUTHENTICATOR-URL"
+  user_name     = "NAME-OF-THE-USER"
+  password      = "SUPER-SECRET-PASSWORD"
+  tenant_name   = "TENANT OR PROJECT NAME"
+  region        = "RegionOne"
+
+  public_network = "public"
+  flavor         = "DESIRED FLAVOUR"
+  image          = "Ubuntu 22.04"
   ```
 
   so SSH logins go through OIDC device flow (and *don’t* fall back to local passwords).
@@ -202,23 +202,15 @@ ssh -l YOUR_OIDC_USERNAME BASTION_PUBLIC_IP
 
 ## Troubleshooting
 
-* **Loop asking for “Password:”**
-  Ensure the PAM line is present in `/etc/pam.d/sshd`, `UsePAM yes`, `KbdInteractiveAuthentication yes`, and `ChallengeResponseAuthentication yes` are set in `/etc/ssh/sshd_config`. Then restart SSH: `sudo systemctl restart sshd`.
-
-* **Immediate disconnect after link shown:**
-  Often caused by a missing local UNIX user. Make sure `preferred_username` (and any accounts you want to use) are listed in `group_vars/bastion.vault.yml`. Re-run the playbook.
-
-* **Template errors (undefined vars):**
-  Make sure `group_vars/bastion.vault.yml` contains `client_id`, `client_secret`, and—if email is enabled—`smtp_password`.
-
-* **Private key Required:**
-  before running you have to create a file here: `~/.ssh/MY_KEY`, with your private key and fill the following field in the inventory with the location of the key (ansible_ssh_private_key_file).
+* Template errors (undefined vars):   Make sure group_vars/bastion.vault.yml contains client_id, client_secret, and—if email is enabled—smtp_password.
+* Private key Required:   Before running, you must create your private key file at the location specified in the inventory: ~/.ssh/my_private
+* Loop asking for “Password:”   Ensure the PAM line is present in /etc/pam.d/sshd. Verify that UsePAM yes, KbdInteractiveAuthentication yes, and ChallengeResponseAuthentication yes are set in /etc/ssh/sshd_config. Then restart SSH: sudo systemctl restart sshd.
 
 ---
 
 ## Safety
 
-* Never commit real secrets. Keep `group_vars/bastion.vault.yml` **encrypted** and **.vault\_pass.txt** out of version control (already in `.gitignore`).
+* Never commit real secrets. Keep group_vars/bastion.vault.yml encrypted and .vault_pass.txt out of version control (and in .gitignore).
 * Test on a disposable VM before adopting in production.
 
 
