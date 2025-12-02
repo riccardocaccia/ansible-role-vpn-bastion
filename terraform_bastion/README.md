@@ -1,44 +1,37 @@
-# Bastion Ansible (PAM OAuth2 Device Flow)
+# Bastion Deployment with Terraform
 
-This playbook turns an **Ubuntu 22.04** VM into a **bastion** that accepts SSH logins via **OpenID Connect (device code flow)** using the [`pam_oauth2_device`](https://github.com/LuigiMansi1/pam_oauth2_device) module.
+These file can be used to define and deploy a Virtual Machine (VM) on OpenStack. This VM is configured to act as a Bastion Host (or jump host), serving as the single secure SSH entry point to access resources located in the private network.
 
-> **Note:** OpenVPN is **not** installed here; you can add it later in the same host.
-
-> **Note:** A modified version of the module had been used, check [`pam_oauth2_device`](https://github.com/riccardocaccia/pam_oauth2_device)
 ---
 
-## What this playbook does
+## What this Terraform configuration files does
 
-* Builds and installs the `pam_oauth2_device` PAM module from your fork.
-* Writes `/etc/pam_oauth2_device/config.json` for your chosen IdP.
-* Adjusts **PAM** and **sshd** to use OIDC device flow for SSH logins.
-* Ensures local UNIX accounts exist for your OIDC users (e.g. the `preferred_username`) and any extra service users (`im`).
-* Optionally sends the device code URL via SMTP (disabled by default).
-* Creates `~/.ssh/authorized_keys` for the `im` user if you provide a public key.
+* Creates an OpenStack keypair for SSH access to the bastion host.
+* Provisions a bastion VM in OpenStack with a `public and private NIC`.
+* Generates an Ansible inventory file pointing to the bastion VM with the correct SSH key.
+* Uses a `null_resource` with local-exec to wait for the VM to be reachable via SSH.
+* Runs the Ansible playbook (site.yml) to configure the bastion host automatically.
 
 ---
 
 ## Repository layout
 
 ```
-inventory
-site.yml
-group_vars/
-  ├─ bastion.yml           # public settings (non-secret)
-  └─ bastion.vault.yml     # secrets (put in Ansible Vault)
-templates/
-  └─ pam_config.json.j2
-.gitignore
+terraform_bastion/
+       ├─ main.tf
+       ├─ terraform.tfvars
+       └─ variables.tf
 ```
 
 ---
 
 ## Requirements
 
-* **Target host:** Ubuntu 22.04 VM reachable over SSH (user with sudo, e.g. `ubuntu`).
+* **Controller:** Terraform ≥ 1.14.0
+(Same as Ansible-requirements): 
 * **Controller:** Ansible ≥ 2.15.
-* **OIDC client:** `client_id` + `client_secret` registered at your Identity Provider (IdP).
-* (Optional) SMTP credentials if you want code/URL by email.
+* **OIDC client:** `client_id` + `client_secret` registered at your Identity Provider (IdP)
+* (Optional) SMTP credentials if you want code/URL by emai.
 
 ---
 
