@@ -28,7 +28,7 @@ terraform_bastion/
 ## Requirements
 
 * **Controller:** Terraform ≥ 1.14.0
-(Same as Ansible-requirements): 
+* (Same as Ansible-requirements): 
 * **Controller:** Ansible ≥ 2.15.
 * **OIDC client:** `client_id` + `client_secret` registered at your Identity Provider (IdP)
 * (Optional) SMTP credentials if you want code/URL by emai.
